@@ -3009,17 +3009,23 @@ static double m_exp(double x)
     double r  = x - kf * LN2;
     double s = 1.0, t = 1.0;
     for (int i = 1; i <= 12; i++) { t = t * r / (double)i; s += t; }
+    /* ★ この板は ARM32 で long が 32 ビットである。Pi 4・Pi 5 から移した原文は
+       `unsigned long` の共用体で指数を組み立てていたが、それでは << 52 が
+       意味を失い、exp が 0 を返していた（実機で判明）。幅を明示する。 */
     long k = (long)kf;
-    union { double d; unsigned long u; } p; p.u = ((unsigned long)(1023 + k)) << 52;
+    union { double d; unsigned long long u; } p;
+    p.u = ((unsigned long long)(1023 + k)) << 52;
     return s * p.d;
 }
 /* log: x = m * 2^e （m in [1,2)）。ln m は atanh 級数で。 */
 static double m_log(double x)
 {
     if (x <= 0) return 0.0;
-    union { double d; unsigned long u; } v; v.d = x;
+    /* ★ 同上。>> 52 と定数 0x800FFFFFFFFFFFFF は 64 ビットでなければならない。
+       32 ビットのまま動かすと log が -704 付近の値を返す。 */
+    union { double d; unsigned long long u; } v; v.d = x;
     long e = (long)((v.u >> 52) & 0x7FF) - 1023;
-    v.u = (v.u & 0x800FFFFFFFFFFFFFUL) | (1023UL << 52);   /* m in [1,2) */
+    v.u = (v.u & 0x800FFFFFFFFFFFFFULL) | (1023ULL << 52);   /* m in [1,2) */
     double m = v.d;
     if (m > 1.4142135623730951) { m *= 0.5; e += 1; }
     double z = (m - 1.0) / (m + 1.0), z2 = z * z, s = 0.0, t = z;
