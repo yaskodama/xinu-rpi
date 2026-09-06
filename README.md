@@ -257,13 +257,24 @@ Notes:
 
 ### How much of AIPL runs here
 
-The canonical language is split into 25 features. **All 25 run** on this
-board. The front end is on the Mac (`compile.ml`), so a change there needs no
-reflash; only the last four rows below needed one.
+Checked against the **sources** of the canonical language — the keywords in
+`src/lexer.mll`, the builtin table in `src/typing_env.ml`, and the effect table
+in the user's guide. The front end is on the Mac (`compile.ml`), so a change
+there needs no reflash; only the rows that need a VM instruction do.
+
+> This used to say "25 of 25". That 25 was a split **made up here**, not read off
+> the sources; counting again turned up `sender`, `timed_out`, `typeof` and
+> `float` field declarations. `sender` happened to work here already — it broke
+> only on the boards that carry their own front end. Count from the sources.
 
 | Feature | Runs | Notes |
 |---|---|---|
 | `class` / `method` / `var` / fields | yes | |
+| `float x = 1.5;` (a field declaration) | yes | `float` is a reserved word, distinct from `var` |
+| `sender` | yes | who sent the message being handled; `send sender.m();` |
+| `timed_out(r)` | yes | the third observer of a `result` (with `is_ok` / `value`) |
+| `typeof(x)` | yes | VM instruction `0x5F` |
+| `neg(x)` | yes | canonically both `int -> int` and `float -> float`; it is not one of the maths builtins |
 | `new` / `init` / `send` / `send!` | yes | `new` always calls `init` |
 | `now` / `future` / `await` / deadlines | yes | by **continuation splitting** |
 | `select` / `case` / `timeout` | yes | `case` names must be real methods |
