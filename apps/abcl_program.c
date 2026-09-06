@@ -3656,6 +3656,18 @@ void abcl_vm_dispatch(int self, int sender, const char *method, value_t *args, i
         case 14: r = -x;         break;
         default: r = 0.0;        break; }
         VPUSH(vm_mkflt(r)); } break;
+    case 0x5F: {                                                            /* TYPEOF */
+        /* 正典の typeof は実行時の型を文字列で返す。名前は正典の綴りに合わせる
+           （int / float / bool / string / array / unit）。 */
+        long v = VPOP();
+        const char *t;
+        if      (vm_is_bool(v)) t = "bool";
+        else if (vm_is_str(v))  t = "string";
+        else if (vm_is_flt(v))  t = "float";
+        else if (vm_is_lst(v))  t = "array";
+        else if (vm_is_err(v))  t = "unit";     /* 失敗した result は値を持たない */
+        else                    t = "int";
+        VPUSH(vm_intern(t)); } break;
     case 0x53: { long nv = VPOP(); vm_res_acquire(nv); } break;              /* ACQUIRE */
     case 0x54: { long nv = VPOP(); vm_res_release(nv); } break;              /* RELEASE */
     case 0x50: { long p = VPOP(); vm_web_port = (int)p; } break;               /* WEBLISTEN */
