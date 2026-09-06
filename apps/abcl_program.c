@@ -3171,6 +3171,9 @@ static void vm_fmt_val(char *out, int cap, long v)
         int neg = (d < 0.0), n = 0;
         long ip; double fr;
         if (neg) d = -d;
+        /* ★ 小数 6 桁で丸める。切り捨てのままだと exp(1) が 2.718281 になり、
+           正典の参照実装（%.6f は四捨五入）と 1 桁ずれる。 */
+        d += 0.0000005;
         ip = (long)d; fr = d - (double)ip;
         if (neg && n < cap - 1) out[n++] = '-';
         { char t[16]; int k = 0;
