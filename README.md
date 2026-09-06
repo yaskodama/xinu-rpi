@@ -257,7 +257,7 @@ Notes:
 
 ### How much of AIPL runs here
 
-The canonical language is split into 25 features. **23 of 25 run** on this
+The canonical language is split into 25 features. **All 25 run** on this
 board. The front end is on the Mac (`compile.ml`), so a change there needs no
 reflash; only the last four rows below needed one.
 
@@ -277,9 +277,9 @@ reflash; only the last four rows below needed one.
 | `replyto` / `answer` / parameter type `reply` | yes | a reply destination *is* an actor id (`__snd`) |
 | `acquire` / `release` | yes | VM instructions `0x53`/`0x54`; a named semaphore per resource |
 | Type / effect / level annotations | accepted, discarded | checked on the canonical side (`tc`) |
-| `float` and float literals | **no** | VM values are 32-bit tagged integers |
-| Arrays (`array_*`) | **no** | likewise — needs a new value representation |
-| Math builtins (`sqrt` etc.) | **no** | likewise |
+| `float` and float literals | yes | boxed in a table; the tag is 3 bits wide (see below) |
+| Arrays (`array_*`) | yes | boxed in a table; `push`/`set` return a new array, as canonically |
+| Math builtins (`sqrt` etc.) | yes | the same series the Pi 4 and Pi 5 use; `sqrt` by Newton (no `fsqrt` on ARM32) |
 | The `call` statement | yes | a builtin called as a statement inside a method |
 | `spawn("Class","name")` | yes | the new actor id goes into the published table under that name |
 | `remote("host:port","actor")` | yes | over UDP/9010, using the Xinu UDP device layer |
@@ -322,9 +322,25 @@ this board are real Xinu processes, so two of them can genuinely contend. Same
 owner re-entry is allowed (the canonical checker rejects a double acquire
 statically anyway), and a `release` of a resource one does not hold is ignored.
 
-Tag discipline, for anyone touching `vm_fmt_val`: the string / bool / err tags
-live in bits 30, 29 and 28, and **every tag test first checks that the value is
-non-negative**. Without that guard `-1` matches every tag at once.
+Tag discipline, for anyone touching `vm_fmt_val`. A negative value is simply an
+integer; for a non-negative one the top three bits (`0x70000000`) are a tag read
+as a **pattern**, not as independent bits:
+
+    000 int (0..0x0FFFFFFF)   001 err   010 bool
+    011 float (index)         100 string (index)   101 array (index)
+
+**Every tag test first checks that the value is non-negative** — without that
+guard `-1` matches every tag at once. Testing single bits instead of the pattern
+is what breaks once a fourth or fifth kind of value appears; that is why floats
+are not simply "one more bit".
+
+Two things about the maths, since they were both learned the hard way on this
+board. `sqrt` cannot be the `fsqrt` instruction the Pi 4 and Pi 5 use — this is
+ARM32 with software floating point — so it is Newton's method. And the exponent
+manipulation inside `exp` and `log` must use `unsigned long long`: `long` is
+**32 bits** here, so the 64-bit shifts silently do nothing and you get
+`exp(1) = 0` while `sqrt`, `sin`, `cos` and `atan` all still look right.
+Measure the maths builtins **one function at a time**.
 
 ## A few useful HTTP routes
 
