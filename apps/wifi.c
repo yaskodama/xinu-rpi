@@ -2321,9 +2321,16 @@ void wifi_serve_start(void)
    戻り: 1=セルに居る（bss に BSSID）/ 0=居ない */
 int wifi_live_bssid(uint8_t *bss)
 {
-    int k, nz = 0;
+    int k, nz = 0, rc;
     if (!wifi_ready) return 0;
-    if (wifi_wlcmd(0, WLC_GET_BSSID, NULL, 0, bss, 6) != 0) return 0;
+    /* ★ 常駐の応答器スレッドが wl_io_sem を握って SDIO を回している。
+       排他を取らずにコマンドを投げると衝突して失敗し、「セルに居ない」と
+       誤って報告する ―― 実際そうなって、セルに居るのに『BSSID なし』と
+       出した。クライアント操作（ping/scan）と同じ作法に揃える。 */
+    wifi_net_pause = 1; wifi_delay_us(40000); wait(wl_io_sem);
+    rc = wifi_wlcmd(0, WLC_GET_BSSID, NULL, 0, bss, 6);
+    signal(wl_io_sem); wifi_net_pause = 0;
+    if (rc != 0) return 0;
     for (k = 0; k < 6; k++) if (bss[k] && bss[k] != 0xFF) nz = 1;
     return nz;
 }
