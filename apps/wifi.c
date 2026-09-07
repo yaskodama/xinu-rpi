@@ -2329,11 +2329,19 @@ int wifi_live_bssid(uint8_t *bss)
 
 int wifi_adhoc(const char *ssid, int channel, int n)
 {
-    uint8_t jp[64], bss[6];
+    /* ★ jp は static（.bss）に置く ―― Pi 4 の実装がそうなっている。
+       この配列は SDIO の転送バッファとしてそのまま渡る。スタック上に置くと
+       整列や置き場所の前提が崩れうる。Pi 4 は ad-hoc セルを作れて Pi 3 は
+       作れない、という差の候補はここだけだった（他の差は zero 埋め済みの
+       重複と、bringup の呼び分けのみ）。 */
+    static uint8_t jp[64];
+    uint8_t bss[6];
     int sl = 0, i, t, up = 0;
     while (ssid[sl] && sl < 32) sl++;
     wifi_log("[wifi] === ADHOC/IBSS \"%s\" ch=%d ip=10.0.0.%d ===\r\n", ssid, channel, n);
-    if (wifi_bringup() != 0) { wifi_log("[wifi] adhoc: bringup failed\r\n"); return -1; }
+    /* 既に上がっていれば bring-up をやり直さない（Pi 4 と同じ）。毎回やり直すと
+       直前に整えた状態を落としうる。 */
+    if (!wifi_ready) { if (wifi_bringup() != 0) { wifi_log("[wifi] adhoc: bringup failed\r\n"); return -1; } }
     wifi_radio_up();
     wifi_cmd_int(WLC_DOWN, 1);
     wifi_set_iovar_int("wsec", 0);
@@ -2373,6 +2381,9 @@ int wifi_adhoc(const char *ssid, int channel, int n)
         wifi_delay_us(500000);
     }
     if (!up) wifi_log("[wifi] adhoc: IBSS not associated yet (no peer / still forming)\r\n");
+    /* ★ associate できていないなら have_ip を立てない。立てると status が
+       「connected」と嘘をつき、切り分けを誤らせる（実際そうなった）。 */
+    if (!up) wifi_have_ip = 0;
     wifi_log("[wifi] mac %02x:%02x:%02x:%02x:%02x:%02x  ip=10.0.0.%d\r\n",
              wifi_mac[0],wifi_mac[1],wifi_mac[2],wifi_mac[3],wifi_mac[4],wifi_mac[5], n);
     if (!wifi_net_active()) {                     /* spawn ARP/ICMP responder thread */
