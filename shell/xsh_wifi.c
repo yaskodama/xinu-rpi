@@ -141,6 +141,12 @@ static void wifi_show_status(void)
                  bss[0],bss[1],bss[2],bss[3],bss[4],bss[5]);
       else
           printf("  BSSID なし ―― 無線はどのセルにも入っていない\n"); }
+    { extern void wifi_adhoc_diag(int *, int *, int *, int *, int *, int *);
+      int a,b,c,d,e,f;
+      wifi_adhoc_diag(&a,&b,&c,&d,&e,&f);
+      if (a != -99)
+          printf("  adhoc: SET_INFRA rc=%d 読返し=%d（0ならIBSS）SET_CHANNEL rc=%d "
+                 "SET_SSID rc=%d セル成立=%d 試行=%d\n", a, b, c, d, e, f); }
     if (wifi_connected()) {
         unsigned char ip[4], gw[4]; int have;
         wifi_dhcp_diag(ip, gw, &have);

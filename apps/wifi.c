@@ -1706,6 +1706,7 @@ static void pbkdf2_sha1(const uint8_t *pass, int plen, const uint8_t *salt, int 
  *  Stage 6 — join a (WPA2-PSK) access point                          *
  * ================================================================== */
 #define WLC_DOWN        3
+#define WLC_GET_INFRA   19
 #define WLC_SET_INFRA   20
 #define WLC_SET_WSEC    134
 #define WLC_SET_WPA_AUTH 165
@@ -2327,6 +2328,22 @@ int wifi_live_bssid(uint8_t *bss)
     return nz;
 }
 
+/* ad-hoc 各段の結果。★ これまで WLC_SET_INFRA / WLC_SET_CHANNEL /
+   WLC_SET_SSID の戻り値を誰も見ておらず、黙って失敗しても「ad-hoc up」と
+   表示していた。どこで落ちているかを外から読めるようにする。 */
+static int g_ah_infra_rc = -99, g_ah_infra_rb = -99, g_ah_chan_rc = -99;
+static int g_ah_ssid_rc  = -99, g_ah_up = -99, g_ah_up_tries = -1;
+void wifi_adhoc_diag(int *infra_rc, int *infra_rb, int *chan_rc,
+                     int *ssid_rc, int *up, int *tries)
+{
+    if (infra_rc) *infra_rc = g_ah_infra_rc;
+    if (infra_rb) *infra_rb = g_ah_infra_rb;
+    if (chan_rc)  *chan_rc  = g_ah_chan_rc;
+    if (ssid_rc)  *ssid_rc  = g_ah_ssid_rc;
+    if (up)       *up       = g_ah_up;
+    if (tries)    *tries    = g_ah_up_tries;
+}
+
 int wifi_adhoc(const char *ssid, int channel, int n)
 {
     /* ★ jp は static（.bss）に置く ―― Pi 4 の実装がそうなっている。
@@ -2347,10 +2364,15 @@ int wifi_adhoc(const char *ssid, int channel, int n)
     wifi_set_iovar_int("wsec", 0);
     wifi_set_iovar_int("wpa_auth", 0);
     wifi_set_iovar_int("auth", 0);
-    wifi_cmd_int(WLC_SET_INFRA, 0);              /* IBSS (ad-hoc) mode */
+    g_ah_infra_rc = wifi_cmd_int(WLC_SET_INFRA, 0);   /* IBSS (ad-hoc) mode */
     wifi_cmd_int(2, 1);                          /* WLC_UP */
     wifi_delay_us(100000);
-    wifi_cmd_int(WLC_SET_CHANNEL, (uint32_t)channel);
+    g_ah_chan_rc = wifi_cmd_int(WLC_SET_CHANNEL, (uint32_t)channel);
+    /* 設定が本当に入ったか読み返す（1 なら infra のまま＝IBSS になっていない） */
+    { uint32_t v = 0xdeadbeef;
+      if (wifi_wlcmd(0, WLC_GET_INFRA, NULL, 0, (uint8_t *)&v, 4) == 0)
+          g_ah_infra_rb = (int)v;
+      else g_ah_infra_rb = -1; }
     for (i = 0; i < (int)sizeof(jp); i++) jp[i] = 0;
     jp[0] = sl; for (i = 0; i < sl; i++) jp[4+i] = ssid[i];
     /* ★ BSSID はブロードキャストにする ―― 「この SSID のセルがあれば参加、
@@ -2362,7 +2384,8 @@ int wifi_adhoc(const char *ssid, int channel, int n)
        8a:58:5a:… / 32:e8:8f:… / 9e:5a:71:… */
     for (i = 36; i < 42; i++) jp[i] = 0xFF;
     jp[44]=0;                                    /* chanspec_num = 0 */
-    if (wifi_wlcmd(1, WLC_SET_SSID, jp, 48, NULL, 0) != 0) { wifi_log("[wifi] adhoc: SET_SSID failed\r\n"); return -1; }
+    g_ah_ssid_rc = wifi_wlcmd(1, WLC_SET_SSID, jp, 48, NULL, 0);
+    if (g_ah_ssid_rc != 0) { wifi_log("[wifi] adhoc: SET_SSID failed\r\n"); return -1; }
     wifi_delay_us(400000);
     wifi_get_iovar("cur_etheraddr", wifi_mac, 6);
     wifi_ip[0]=10; wifi_ip[1]=0; wifi_ip[2]=0; wifi_ip[3]=(uint8_t)n;
@@ -2371,10 +2394,12 @@ int wifi_adhoc(const char *ssid, int channel, int n)
     for (i = 0; i < 4; i++) wifi_dns[i] = 0;
     for (i = 0; i < sl && i < 38; i++) wifi_cur_ssid[i] = ssid[i]; wifi_cur_ssid[i] = 0;
     wifi_have_ip = 1;
+    g_ah_up = 0; g_ah_up_tries = 0;
     for (t = 0; t < 24; t++) {
+        g_ah_up_tries = t + 1;
         if (wifi_wlcmd(0, WLC_GET_BSSID, NULL, 0, bss, 6) == 0) {
             int k, nz = 0; for (k = 0; k < 6; k++) if (bss[k] && bss[k] != 0xFF) nz = 1;
-            if (nz) { up = 1;
+            if (nz) { up = 1; g_ah_up = 1;
                 wifi_log("[wifi] adhoc: *** IBSS cell up, BSSID %02x:%02x:%02x:%02x:%02x:%02x ***\r\n",
                          bss[0],bss[1],bss[2],bss[3],bss[4],bss[5]); break; }
         }
