@@ -161,7 +161,7 @@ static void wifi_show_status(void)
 shellcmd xsh_wifi(int nargs, char *args[])
 {
     if (nargs < 2) {
-        printf("Usage: %s on [ssid pass]|off|status\n", args[0]);
+        printf("Usage: %s on [ssid pass]|off|status|ping <ip> [n]|adhoc <ssid> [ch] [node]\n", args[0]);
         return 0;
     }
 
@@ -211,6 +211,26 @@ shellcmd xsh_wifi(int nargs, char *args[])
     if (strcmp(args[1], "off") == 0) {
         wifi_disconnect();
         printf("WiFi: disconnected\n");
+        return 0;
+    }
+
+    /* ★ 無線側の ping。素の `ping` は Xinu の有線スタック（rtLookup の経路表）を
+       使うので、WiFi の ad-hoc 経路 10.0.0.x へは一切届かない。それに気づかず
+       「メッシュの疎通なし」と何度も報告した ―― 実際は Pi 4 からの
+       `wifi ping` は 4/4 応答していた。物差しを間違えていた。 */
+    if (strcmp(args[1], "ping") == 0) {
+        extern int wifi_ping(const unsigned char *ip, int count);
+        unsigned char ip[4] = {0,0,0,0};
+        int oct = 0, val = 0, cnt = 4; const char *p;
+        if (nargs < 3) { printf("Usage: %s ping <a.b.c.d> [count]\n", args[0]); return 0; }
+        for (p = args[2]; ; p++) {
+            if (*p >= '0' && *p <= '9') val = val*10 + (*p - '0');
+            else { if (oct < 4) ip[oct] = (unsigned char)val; oct++; val = 0; if (!*p) break; }
+        }
+        if (nargs >= 4) { cnt = 0; for (p = args[3]; *p>='0'&&*p<='9'; p++) cnt = cnt*10 + (*p-'0'); }
+        printf("WiFi ping %u.%u.%u.%u x%d ...\n", ip[0],ip[1],ip[2],ip[3], cnt);
+        { int r = wifi_ping(ip, cnt);
+          printf("WiFi ping: %d/%d 応答\n", r < 0 ? 0 : r, cnt); }
         return 0;
     }
 
