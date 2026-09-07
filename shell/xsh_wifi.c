@@ -131,6 +131,16 @@ static void wifi_readline(int fd, char *buf, int max, int mask)
 
 static void wifi_show_status(void)
 {
+    /* ★ まずファームウェアに「いまどのセルに居るか」を聞く。局所変数だけを
+       見ていると、ad-hoc で IP を代入しただけの状態を「接続済み」と表示して
+       しまう（実際そうなっていて、合流の切り分けを誤らせた）。 */
+    { unsigned char bss[6];
+      extern int wifi_live_bssid(unsigned char *);
+      if (wifi_live_bssid(bss))
+          printf("  BSSID %02x:%02x:%02x:%02x:%02x:%02x （ファームから取得）\n",
+                 bss[0],bss[1],bss[2],bss[3],bss[4],bss[5]);
+      else
+          printf("  BSSID なし ―― 無線はどのセルにも入っていない\n"); }
     if (wifi_connected()) {
         unsigned char ip[4], gw[4]; int have;
         wifi_dhcp_diag(ip, gw, &have);
