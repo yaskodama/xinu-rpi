@@ -2331,7 +2331,14 @@ int wifi_adhoc(const char *ssid, int channel, int n)
     wifi_cmd_int(WLC_SET_CHANNEL, (uint32_t)channel);
     for (i = 0; i < (int)sizeof(jp); i++) jp[i] = 0;
     jp[0] = sl; for (i = 0; i < sl; i++) jp[4+i] = ssid[i];
-    jp[36]=0x02; jp[37]=0x4d; jp[38]=0x41; jp[39]=0x4e; jp[40]=0x45; jp[41]=0x54;
+    /* ★ BSSID はブロードキャストにする ―― 「この SSID のセルがあれば参加、
+       無ければ作る」の意味。以前は 02:4d:41:4e:45:54 ("MANET") を指定していたが、
+       あれは「ちょうどこの BSSID のセルに参加せよ」であり、そんなセルは誰も
+       作らない（IBSS を新規作成するとき、ファームウェアは要求された BSSID を
+       使わず、ローカル管理ビットの立った値を自分で作る）。結果、全ノードが
+       自分だけのセルを作って永久に合流しなかった。実測でも毎回別の値が返った:
+       8a:58:5a:… / 32:e8:8f:… / 9e:5a:71:… */
+    for (i = 36; i < 42; i++) jp[i] = 0xFF;
     jp[44]=0;                                    /* chanspec_num = 0 */
     if (wifi_wlcmd(1, WLC_SET_SSID, jp, 48, NULL, 0) != 0) { wifi_log("[wifi] adhoc: SET_SSID failed\r\n"); return -1; }
     wifi_delay_us(400000);
