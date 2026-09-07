@@ -167,6 +167,143 @@ int aipl_remote_call(const char *hostport, const char *actor, const char *meth,
                      const char *arg, int timeout_ms, char *out, int cap)
 { return remote_xfer(hostport, actor, meth, arg, timeout_ms > 0 ? timeout_ms : 2000, out, cap); }
 
+/* ===== メッシュの三つ（送り手） ============================================
+ * 宛先表を持たない。自網の同報へ撒いて、返ってきた分だけを拾う。
+ * 経路が変わっても、誰が消えても、ここは変わらない。
+ *
+ * ★ 受けと送りで装置を分ける。同報宛に結んだ装置で待つと、返事は相手の
+ *   実 IP から来るので udpDemux が噛み合わない（remoteip が一致しない）。
+ *   受けは「局所ポートだけ決めて相手は決めない」装置にする（DEST_MATCH）。
+ */
+#define MESH_RX_PORT 9011
+
+static int mesh_open_tx(void)
+{
+    int dev = udpAlloc();
+    if (SYSERR == dev) return -1;
+    /* ★ 局所ポートを MESH_RX_PORT に固定する。以前は 0（任意）で開いていた。
+       相手は「要求が来た送信元ポート」へ返すので、任意ポートで出すと返事は
+       その場限りのポートに届き、9011 で待っている受信装置は永遠に見ない。
+       計器がそう言った ―― Pi 4 の rx_q は Pi 3 の同報を 8 通数えているのに、
+       Pi 3 の gather は 0 のままだった（＝出てはいる、返りが噛み合わない）。 */
+    if (SYSERR == open(dev, &netiftab[0].ip, &netiftab[0].ipbrc,
+                       MESH_RX_PORT, AIPL_PORT)) {
+        udptab[dev - UDP0].state = UDP_FREE; return -1;
+    }
+    return dev;
+}
+
+/* 撒いて、期限まで拾う。kind の行だけを、送り主ごとに一つ集める。
+ * 戻りは集まった数。out は stride 幅の並び。 */
+static int mesh_run(const char *line, int len, int id, char kind, int ms,
+                    char *out, int stride, int max)
+{
+    int txdev, rxdev, n, waited = 0, got = 0, since_tx = 0;
+    uchar seen[8][4];
+    static char rbuf[1024];
+
+    rxdev = udpAlloc();
+    if (SYSERR == rxdev) return 0;
+    if (SYSERR == open(rxdev, &netiftab[0].ip, NULL, MESH_RX_PORT, 0)) {
+        udptab[rxdev - UDP0].state = UDP_FREE; return 0;
+    }
+    control(rxdev, UDP_CTRL_SETFLAG, UDP_FLAG_PASSIVE, 0);
+    control(rxdev, UDP_CTRL_SETFLAG, UDP_FLAG_NOBLOCK, 0);
+
+    txdev = mesh_open_tx();
+    if (txdev < 0) { close(rxdev); return 0; }
+    write(txdev, (void *)line, len);
+
+    if (ms <= 0) ms = 1;
+    while (waited < ms && got < max) {
+        if (since_tx >= 200) { write(txdev, (void *)line, len); since_tx = 0; }
+        n = read(rxdev, rbuf, sizeof rbuf - 1);
+        if (n > (int)sizeof(struct udpPseudoHdr)) {
+            struct udpPseudoHdr *ph = (struct udpPseudoHdr *)rbuf;
+            struct udpPkt *pkt = (struct udpPkt *)(rbuf + sizeof(struct udpPseudoHdr));
+            char *p = (char *)pkt->data;
+            int plen = (int)pkt->len - UDP_HDR_LEN;
+            if (plen > 2 && plen < (int)sizeof rbuf - 64) {
+                int k = 0; p[plen] = 0;
+                while (p[k]) { if (p[k]=='\n'||p[k]=='\r') { p[k]=0; break; } k++; }
+                if (p[0] == kind && p[1] == ' ') {
+                    int q = 2, gotid = 0, dup = 0, i;
+                    while (p[q] >= '0' && p[q] <= '9') { gotid = gotid*10 + (p[q]-'0'); q++; }
+                    if (p[q] == ' ') q++;
+                    for (i = 0; i < got; i++)
+                        if (seen[i][0]==(uchar)ph->srcIp[0] && seen[i][1]==(uchar)ph->srcIp[1]
+                         && seen[i][2]==(uchar)ph->srcIp[2] && seen[i][3]==(uchar)ph->srcIp[3])
+                            dup = 1;                       /* 同じ相手は一つだけ */
+                    if (gotid == id && !dup) {
+                        char *d = out + got * stride;
+                        if (kind == 'A') {                 /* 答は送り主の IP そのもの */
+                            int at = 0;
+                            for (i = 0; i < 4; i++) {
+                                char nb[8]; sprintf(nb, "%d", (int)(uchar)ph->srcIp[i]);
+                                at = put(d, at, stride, nb);
+                                if (i < 3) at = put(d, at, stride, ".");
+                            }
+                        } else {                           /* R : 値の文字 */
+                            int t = 0; while (p[q] && t < stride - 1) d[t++] = p[q++];
+                            d[t] = 0;
+                        }
+                        for (i = 0; i < 4; i++) seen[got][i] = (uchar)ph->srcIp[i];
+                        got++;
+                    }
+                }
+            }
+            continue;                                      /* 続けて読む */
+        }
+        sleep(5); waited += 5; since_tx += 5;
+    }
+    close(txdev); close(rxdev);
+    return got;
+}
+
+/* neighbors() — 今つながっている相手の IP。過去に見た相手ではない。 */
+int aipl_mesh_probe(char *out, int stride, int max, int ms)
+{
+    char q[32]; int n = 0, id = g_next_id++;
+    if (g_next_id > 1000000) g_next_id = 1;
+    n = put(q, n, sizeof q, "H ");
+    { char nb[16]; sprintf(nb, "%d", id); n = put(q, n, sizeof q, nb); }
+    n = put(q, n, sizeof q, "\n");
+    return mesh_run(q, n, id, 'A', ms > 0 ? ms : 300, out, stride, max);
+}
+
+/* broadcast(役, メソッド, 引数) — 撒くだけ。返事は求めない。 */
+int aipl_mesh_bcast(const char *actor, const char *meth, const char *arg)
+{
+    int dev, n = 0, id = g_next_id++;
+    char q[288];
+    if (g_next_id > 1000000) g_next_id = 1;
+    n = put(q, n, sizeof q, "B ");
+    { char nb[16]; sprintf(nb, "%d", id); n = put(q, n, sizeof q, nb); }
+    n = put(q, n, sizeof q, " ");
+    n = put(q, n, sizeof q, actor);
+    n = put(q, n, sizeof q, " ");
+    n = put(q, n, sizeof q, meth);
+    n = put(q, n, sizeof q, " ");
+    n = put(q, n, sizeof q, arg ? arg : "");
+    n = put(q, n, sizeof q, "\n");
+    dev = mesh_open_tx();
+    if (dev < 0) return -1;
+    write(dev, q, n);
+    close(dev);
+    return 0;
+}
+
+/* gather(役, メソッド, 引数, ms) — 同報で問い、期限までに届いた分だけ返す。
+ * 全員から返る保証は無い。だから戻りが配列なのである。 */
+int aipl_mesh_gather(const char *actor, const char *meth, const char *arg,
+                     int ms, char *out, int stride, int max)
+{
+    char q[288]; int n, id = g_next_id++;
+    if (g_next_id > 1000000) g_next_id = 1;
+    n = build_q(q, sizeof q, id, actor, meth, arg);
+    return mesh_run(q, n, id, 'R', ms, out, stride, max);
+}
+
 /* 応答を返す。
    ★ 番人の装置は UDP_FLAG_PASSIVE で開いている。その装置の udpWrite は
      「擬似ヘッダ＋UDP ヘッダ＋本文」を要求し、本文だけ渡すと長さ検査で
@@ -191,26 +328,16 @@ static int reply_to(const struct netaddr *dst, ushort dstpt, const char *msg, in
  * UDP/9010 に常駐して、来た要求をこの板の公開アクターへ渡す。
  * PASSIVE で開くと、読んだ塊の先頭に送り主の擬似ヘッダが付いてくるので、
  * ARP も相手表も要らずに返せる。 */
-thread aipl_remote_daemon(void)
+/* ---- 同報の受け口 --------------------------------------------------------
+   udpDemux は「装置の局所 IP が宛先 IP と一致すること」を求める（device/udp/
+   udpDemux.c）。同報の宛先は 192.168.3.255 なので、自分の IP に結んだ装置には
+   一致せず、黙って落ちる ―― メッシュの三つが Pi 3 だけ届かない理由がこれ。
+   Xinu の振り分けには手を入れず、同報の宛て先に結んだ装置をもう 1 本開いて
+   同じ番人を回す。受け口が二つになるだけで、扱いは何も変わらない。 */
+static void remote_serve(int dev)
 {
-    int dev, n, i;
+    int n;
     static char buf[1024];
-
-    for (i = 0; i < 60; i++) {
-        if (ethertab[0].state == ETH_STATE_UP) break;
-        sleep(500);
-    }
-    dev = udpAlloc();
-    if (SYSERR == dev) { g_state = 1; kprintf("[remote] udpAlloc failed\r\n"); return SYSERR; }
-    if (SYSERR == open(dev, &netiftab[0].ip, NULL, AIPL_PORT, 0)) {
-        g_state = 2;
-        kprintf("[remote] open(:%d) failed\r\n", AIPL_PORT);
-        udptab[dev - UDP0].state = UDP_FREE; return SYSERR;
-    }
-    control(dev, UDP_CTRL_SETFLAG, UDP_FLAG_PASSIVE, 0);
-    g_state = 3;
-    kprintf("[remote] AIPL remote listening on UDP %d\r\n", AIPL_PORT);
-
     for (;;) {
         n = read(dev, buf, sizeof buf - 1);
         g_n_read++; g_last_n = n;
@@ -237,6 +364,44 @@ thread aipl_remote_daemon(void)
           memcpy(src.addr, ph->srcIp, IPv4_ADDR_LEN);
 
           g_last_c0 = (long)(unsigned char)p[0];
+
+          /* ---- H <id> : 誰かいますか（同報）。居ることだけを単送で返す ----
+             メッシュの neighbors() の呼びかけである。 */
+          if (p[0] == 'H' && p[1] == ' ') {
+              int q = 2, id = 0, at = 0;
+              char reply[32];
+              while (p[q] >= '0' && p[q] <= '9') { id = id*10 + (p[q]-'0'); q++; }
+              at = put(reply, at, sizeof reply, "A ");
+              { char nb[16]; sprintf(nb, "%d", id); at = put(reply, at, sizeof reply, nb); }
+              at = put(reply, at, sizeof reply, "\n");
+              reply_to(&src, srcpt, reply, at);
+              continue;
+          }
+
+          /* ---- B <id> <役> <メソッド> <引数> : broadcast(...)。返事は出さない ----
+             返すと、撒いた一通に対して全員が返して嵐になる。控え（at-most-once）は
+             Q と同じものを使うので、再送で二度走ることはない。 */
+          if (p[0] == 'B' && p[1] == ' ') {
+              int q = 2, id = 0, k;
+              char actor[40], meth[40], val[192];
+              while (p[q] >= '0' && p[q] <= '9') { id = id*10 + (p[q]-'0'); q++; }
+              if (p[q] == ' ') q++;
+              k = 0; while (p[q] && p[q] != ' ' && k < (int)sizeof actor - 1) actor[k++] = p[q++];
+              actor[k] = 0;
+              if (p[q] == ' ') q++;
+              k = 0; while (p[q] && p[q] != ' ' && k < (int)sizeof meth - 1) meth[k++] = p[q++];
+              meth[k] = 0;
+              if (p[q] == ' ') q++;
+              if (ans_lookup((const uchar *)src.addr, id)) continue;   /* 再送 */
+              { char withslash[42]; withslash[0] = '/';
+                { int t = 0; while (actor[t] && t < 40) { withslash[t+1] = actor[t]; t++; }
+                  withslash[t+1] = 0; }
+                if (!vm_remote_call(actor, meth, p + q, val, sizeof val))
+                    vm_remote_call(withslash, meth, p + q, val, sizeof val); }
+              ans_store((const uchar *)src.addr, id, "ok");
+              continue;
+          }
+
           if (!(p[0] == 'Q' && p[1] == ' ')) { g_n_notq++; continue; }
           g_n_q++;
 
@@ -284,5 +449,47 @@ thread aipl_remote_daemon(void)
               if (0 == reply_to(&src, srcpt, reply, at)) g_n_reply++; } }
         }
     }
+}
+
+/* 同報の受け口だけを回す番人（自網.255 に結ぶ） */
+thread aipl_remote_bcast_daemon(void)
+{
+    int dev, i;
+    for (i = 0; i < 60; i++) {
+        if (ethertab[0].state == ETH_STATE_UP) break;
+        sleep(500);
+    }
+    dev = udpAlloc();
+    if (SYSERR == dev) return SYSERR;
+    if (SYSERR == open(dev, &netiftab[0].ipbrc, NULL, AIPL_PORT, 0)) {
+        udptab[dev - UDP0].state = UDP_FREE; return SYSERR;
+    }
+    control(dev, UDP_CTRL_SETFLAG, UDP_FLAG_PASSIVE, 0);
+    kprintf("[remote] AIPL mesh listening on UDP %d (broadcast)\r\n", AIPL_PORT);
+    remote_serve(dev);
+    return OK;
+}
+
+thread aipl_remote_daemon(void)
+{
+    int dev, i;
+    for (i = 0; i < 60; i++) {
+        if (ethertab[0].state == ETH_STATE_UP) break;
+        sleep(500);
+    }
+    dev = udpAlloc();
+    if (SYSERR == dev) { g_state = 1; kprintf("[remote] udpAlloc failed\r\n"); return SYSERR; }
+    if (SYSERR == open(dev, &netiftab[0].ip, NULL, AIPL_PORT, 0)) {
+        g_state = 2;
+        kprintf("[remote] open(:%d) failed\r\n", AIPL_PORT);
+        udptab[dev - UDP0].state = UDP_FREE; return SYSERR;
+    }
+    control(dev, UDP_CTRL_SETFLAG, UDP_FLAG_PASSIVE, 0);
+    g_state = 3;
+    kprintf("[remote] AIPL remote listening on UDP %d\r\n", AIPL_PORT);
+    /* 同報の受け口を別プロセスで立てる（読みは塞ぐので 1 本では兼ねられない） */
+    ready(create((void *)aipl_remote_bcast_daemon, 4096, 20,
+                 "aipl-mesh", 0), RESCHED_NO);
+    remote_serve(dev);
     return OK;
 }

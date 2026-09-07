@@ -3443,6 +3443,10 @@ static void vm_res_release(long nv)
 /* 相手が描いた文字列を値に読み直す。型は運んでいない ―― 正典の型検査器が
    両側の型を合わせている前提で成り立つ約束である。 */
 extern int  aipl_remote_send(const char *, const char *, const char *, const char *);
+extern int  aipl_mesh_probe(char *out, int stride, int max, int ms);
+extern int  aipl_mesh_bcast(const char *, const char *, const char *);
+extern int  aipl_mesh_gather(const char *, const char *, const char *, int,
+                             char *out, int stride, int max);
 extern int  aipl_remote_call(const char *, const char *, const char *, const char *,
                              int, char *, int);
 static long vm_remote_value(const char *t)
@@ -3617,6 +3621,35 @@ void abcl_vm_dispatch(int self, int sender, const char *method, value_t *args, i
             VPUSH(v == (long)VM_ERR_TAG ? dflt : v);
         }
     } break;
+    /* --- メッシュの三つ。宛先を書かずに同報で撒く（UDP/9010）---------------
+       戻りが配列なのは、全員から返るとは限らないからである。届かなかった
+       相手は単に入らない ―― 失敗の機構は増やしていない。 */
+    case 0x60: {                                                            /* NEIGHBORS */
+        char ips[8][16]; long tmp[8];
+        int n = aipl_mesh_probe(&ips[0][0], 16, 8, 1000), i;
+        for (i = 0; i < n; i++) tmp[i] = vm_intern(ips[i]);
+        VPUSH(vm_mklst(tmp, n)); } break;
+    case 0x61: {                                                            /* BROADCAST */
+        char a[40], m[40], g[96];
+        long ag = VPOP(), me = VPOP(), sv = VPOP();
+        vm_fmt_val(a, sizeof a, sv); vm_fmt_val(m, sizeof m, me);
+        vm_fmt_val(g, sizeof g, ag);
+        aipl_mesh_bcast(a, m, g); } break;
+    case 0x62: {                                                            /* GATHER */
+        char a[40], m[40], g[96], vals[8][40]; long tmp[8];
+        long ms = VPOP(), ag = VPOP(), me = VPOP(), sv = VPOP();
+        int n, i, k = 0;
+        vm_fmt_val(a, sizeof a, sv); vm_fmt_val(m, sizeof m, me);
+        vm_fmt_val(g, sizeof g, ag);
+        n = aipl_mesh_gather(a, m, g, (int)ms, &vals[0][0], 40, 8);
+        for (i = 0; i < n; i++) {
+            long v = vm_remote_value(vals[i]);
+            /* そのアクタを持っていない板は err を返す。「届かなかった」と
+               「持っていなかった」を配列の上で区別しない。 */
+            if (v == (long)VM_ERR_TAG) continue;
+            tmp[k++] = v;
+        }
+        VPUSH(vm_mklst(tmp, k)); } break;
     /* --- 配列（正典 array_*）------------------------------------------------
        正典では array_push / array_set は「新しい配列を返す」ので、ここでも
        作り直す。回収は無いが、板に投げるプログラムの寿命は短いので足りる。 */
